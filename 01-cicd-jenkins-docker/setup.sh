@@ -98,6 +98,7 @@ docker run -d \
   -p 50000:50000 \
   -e JENKINS_ADMIN_USER="${JENKINS_USER}" \
   -e JENKINS_ADMIN_PASSWORD="${JENKINS_PASS}" \
+  -e HOST_WORKSPACE="${WORKSPACE_ROOT}" \
   --group-add "${DOCKER_GID}" \
   -v jenkins_home:/var/jenkins_home \
   -v /var/run/docker.sock:/var/run/docker.sock \

@@ -13,6 +13,10 @@ pipeline {
 
   environment {
     APP_DIR        = '/workspace/app'
+    // HOST_WORKSPACE is injected by setup.sh so nested docker run volume
+    // mounts use the host path (the host daemon resolves -v paths on the
+    // host, not inside the Jenkins container).
+    HOST_APP_DIR   = "${env.HOST_WORKSPACE}/app"
     IMAGE_NAME     = 'flask-devops-app'
     IMAGE_TAG      = "${env.BUILD_NUMBER}"
     CONTAINER_NAME = 'flask-devops-app'
@@ -50,7 +54,7 @@ pipeline {
         dir(env.APP_DIR) {
           sh '''
             docker run --rm \
-              -v "$PWD":/app \
+              -v "${HOST_APP_DIR}":/app \
               -w /app \
               python:3.12-slim \
               sh -c "pip install -q -r requirements.txt && pytest -q --tb=short --junit-xml=test-results.xml"
