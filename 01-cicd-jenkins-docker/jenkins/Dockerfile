@@ -1,6 +1,6 @@
 # Custom Jenkins image — pre-installs plugins and seeds the admin user.
 # Build args allow overriding versions without editing the Dockerfile.
-ARG JENKINS_VERSION=2.452.3-lts-jdk17
+ARG JENKINS_VERSION=lts-jdk21
 FROM jenkins/jenkins:${JENKINS_VERSION}
 
 USER root
@@ -24,4 +24,4 @@ RUN jenkins-plugin-cli --plugin-file /usr/share/jenkins/ref/plugins.txt
 COPY security.groovy /usr/share/jenkins/ref/init.groovy.d/security.groovy
 
 # Skip the interactive setup wizard (config is fully automated)
-ENV JAVA_OPTS="-Djenkins.install.runSetupWizard=false"
+ENV JAVA_OPTS="-Djenkins.install.runSetupWizard=false -Dhudson.plugins.git.GitSCM.ALLOW_LOCAL_CHECKOUT=true"

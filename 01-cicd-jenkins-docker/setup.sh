@@ -25,7 +25,7 @@ JENKINS_PORT="${JENKINS_PORT:-8080}"
 APP_PORT="${APP_PORT:-5000}"
 JENKINS_USER="${JENKINS_ADMIN_USER:-admin}"
 JENKINS_PASS="${JENKINS_ADMIN_PASSWORD:-ChangeMe123!}"
-JENKINS_IMAGE="custom-jenkins:2.452.3"
+JENKINS_IMAGE="custom-jenkins:lts"
 JENKINS_CONTAINER="jenkins"
 WORKSPACE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -52,24 +52,23 @@ log "Initialising Git remote..."
 REMOTE_DIR="${WORKSPACE_ROOT}/remote.git"
 APP_DIR="${WORKSPACE_ROOT}/app"
 
-if [ ! -d "${REMOTE_DIR}" ]; then
-  git init --bare "${REMOTE_DIR}"
-  ok "Created bare remote at ${REMOTE_DIR}"
-else
-  ok "Bare remote already exists — skipping"
-fi
+# Always ensure a fresh bare remote (idempotent — rm -rf is safe because
+# this is a local bare repo we own; the real source of truth is app/).
+rm -rf "${REMOTE_DIR}"
+git init --bare "${REMOTE_DIR}"
+ok "Bare remote initialised at ${REMOTE_DIR}"
+
+# Remove any .git left behind by a previous Jenkins checkout (which runs
+# inside the bind-mounted /workspace/app and can wipe this directory).
+rm -rf "${APP_DIR}/.git"
 
 cd "${APP_DIR}"
-if ! git rev-parse --git-dir >/dev/null 2>&1; then
-  git init -b main
-  git add .
-  git commit -m "Initial Flask app for Jenkins CI/CD"
-  git remote add origin "${REMOTE_DIR}"
-  git push -u origin main
-  ok "Initialised app repo and pushed to remote"
-else
-  ok "App repo already initialised — skipping"
-fi
+git init -b main
+git add .
+git commit -m "Initial Flask app for Jenkins CI/CD"
+git remote add origin "${REMOTE_DIR}"
+git push -u origin main
+ok "App repo initialised and pushed to remote"
 cd "${WORKSPACE_ROOT}"
 
 # --------------------------------------------------------------------------- #
@@ -77,7 +76,7 @@ cd "${WORKSPACE_ROOT}"
 # --------------------------------------------------------------------------- #
 log "Building Jenkins Docker image (${JENKINS_IMAGE})..."
 docker build \
-  --build-arg JENKINS_VERSION=2.452.3-lts-jdk17 \
+  --build-arg JENKINS_VERSION=lts-jdk21 \
   -t "${JENKINS_IMAGE}" \
   "${WORKSPACE_ROOT}/jenkins"
 ok "Jenkins image built"
@@ -87,7 +86,10 @@ ok "Jenkins image built"
 # --------------------------------------------------------------------------- #
 log "Starting Jenkins container..."
 docker rm -f "${JENKINS_CONTAINER}" 2>/dev/null || true
+docker volume rm jenkins_home 2>/dev/null || true
 docker volume create jenkins_home >/dev/null
+
+DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)
 
 docker run -d \
   --name "${JENKINS_CONTAINER}" \
@@ -96,6 +98,7 @@ docker run -d \
   -p 50000:50000 \
   -e JENKINS_ADMIN_USER="${JENKINS_USER}" \
   -e JENKINS_ADMIN_PASSWORD="${JENKINS_PASS}" \
+  --group-add "${DOCKER_GID}" \
   -v jenkins_home:/var/jenkins_home \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v /usr/bin/docker:/usr/bin/docker \
@@ -107,22 +110,32 @@ ok "Jenkins container started on port ${JENKINS_PORT}"
 # --------------------------------------------------------------------------- #
 # 5. Wait for Jenkins to be ready
 # --------------------------------------------------------------------------- #
-log "Waiting for Jenkins to become ready (up to 120 s)..."
+log "Waiting for Jenkins to be fully ready (up to 120 s)..."
 for i in $(seq 1 24); do
-  if curl -s "http://localhost:${JENKINS_PORT}/login" | grep -q "Jenkins"; then
+  CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+    -u "${JENKINS_USER}:${JENKINS_PASS}" \
+    "http://localhost:${JENKINS_PORT}/crumbIssuer/api/json" 2>/dev/null || echo "000")
+  if [ "${CODE}" = "200" ]; then
     ok "Jenkins is ready (attempt ${i})"
     break
   fi
   if [ "${i}" -eq 24 ]; then
-    fail "Jenkins did not start within 120 s — check: docker logs ${JENKINS_CONTAINER}"
+    fail "Jenkins did not become ready within 120 s — check: docker logs ${JENKINS_CONTAINER}"
   fi
-  echo "  ... waiting (${i}/24)"
+  echo "  ... waiting (${i}/24, HTTP ${CODE})"
   sleep 5
 done
 
-# Helper: fetch Jenkins crumb (CSRF token) for API calls
+# Shared cookie jar — all Jenkins API calls must use the same session so
+# the CSRF crumb fetched below remains valid for subsequent requests.
+COOKIE_JAR=$(mktemp /tmp/jenkins-cookies-XXXXXX.txt)
+trap "rm -f ${COOKIE_JAR}" EXIT
+
+# Helper: fetch Jenkins crumb (CSRF token) for API calls.
+# Always uses COOKIE_JAR so the crumb is tied to this session.
 get_crumb() {
-  curl -s -u "${JENKINS_USER}:${JENKINS_PASS}" \
+  curl -s -c "${COOKIE_JAR}" -b "${COOKIE_JAR}" \
+    -u "${JENKINS_USER}:${JENKINS_PASS}" \
     "http://localhost:${JENKINS_PORT}/crumbIssuer/api/json" \
     | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['crumbRequestField']+':'+d['crumb'])"
 }
@@ -155,18 +168,21 @@ CRUMB=$(get_crumb)
 
 # Check if job already exists
 HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+  -c "${COOKIE_JAR}" -b "${COOKIE_JAR}" \
   -u "${JENKINS_USER}:${JENKINS_PASS}" \
   "http://localhost:${JENKINS_PORT}/job/flask-cicd/api/json")
 
 if [ "${HTTP_CODE}" = "200" ]; then
   log "Job 'flask-cicd' already exists — updating config..."
-  curl -s -u "${JENKINS_USER}:${JENKINS_PASS}" \
+  curl -s -c "${COOKIE_JAR}" -b "${COOKIE_JAR}" \
+    -u "${JENKINS_USER}:${JENKINS_PASS}" \
     -H "${CRUMB}" \
     -H "Content-Type: application/xml" \
     -X POST "http://localhost:${JENKINS_PORT}/job/flask-cicd/config.xml" \
     --data-binary "@${WORKSPACE_ROOT}/job-final.xml" >/dev/null
 else
-  curl -s -u "${JENKINS_USER}:${JENKINS_PASS}" \
+  curl -s -c "${COOKIE_JAR}" -b "${COOKIE_JAR}" \
+    -u "${JENKINS_USER}:${JENKINS_PASS}" \
     -H "${CRUMB}" \
     -H "Content-Type: application/xml" \
     -X POST "http://localhost:${JENKINS_PORT}/createItem?name=flask-cicd" \
@@ -179,23 +195,31 @@ ok "Pipeline job 'flask-cicd' created/updated"
 # --------------------------------------------------------------------------- #
 log "Triggering first build..."
 CRUMB=$(get_crumb)
-curl -s -u "${JENKINS_USER}:${JENKINS_PASS}" \
+curl -s -c "${COOKIE_JAR}" -b "${COOKIE_JAR}" \
+  -u "${JENKINS_USER}:${JENKINS_PASS}" \
   -H "${CRUMB}" \
   -X POST "http://localhost:${JENKINS_PORT}/job/flask-cicd/build" >/dev/null
 ok "Build triggered"
 
-# Wait for build #1 to start and stream the log
-log "Waiting for build #1 to start..."
-for i in $(seq 1 12); do
-  CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+# Wait for build #1 to finish (up to 10 min)
+log "Waiting for build #1 to complete (up to 10 min)..."
+for i in $(seq 1 60); do
+  BUILD_JSON=$(curl -s -c "${COOKIE_JAR}" -b "${COOKIE_JAR}" \
     -u "${JENKINS_USER}:${JENKINS_PASS}" \
-    "http://localhost:${JENKINS_PORT}/job/flask-cicd/1/api/json")
-  [ "${CODE}" = "200" ] && break
-  sleep 5
+    "http://localhost:${JENKINS_PORT}/job/flask-cicd/1/api/json" 2>/dev/null || echo "{}")
+  BUILDING=$(echo "${BUILD_JSON}" | python3 -c "import sys,json; print(json.load(sys.stdin).get('building','true'))" 2>/dev/null || echo "true")
+  RESULT=$(echo "${BUILD_JSON}"   | python3 -c "import sys,json; print(json.load(sys.stdin).get('result',''))"   2>/dev/null || echo "")
+  if [ "${BUILDING}" = "False" ] && [ -n "${RESULT}" ]; then
+    ok "Build #1 finished: ${RESULT}"
+    break
+  fi
+  echo "  ... build running (${i}/60)"
+  sleep 10
 done
 
-log "Streaming build log (Ctrl+C to stop following)..."
-curl -s -u "${JENKINS_USER}:${JENKINS_PASS}" \
+log "Build log:"
+curl -s -c "${COOKIE_JAR}" -b "${COOKIE_JAR}" \
+  -u "${JENKINS_USER}:${JENKINS_PASS}" \
   "http://localhost:${JENKINS_PORT}/job/flask-cicd/1/consoleText" || true
 echo ""
 
