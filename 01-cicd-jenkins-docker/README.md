@@ -440,9 +440,7 @@ Expected output:
 
 ## 7. Video Transcript
 
-> The full recording script for this tutorial is in `TRANSCRIPT.md`.
-> That file is excluded from student distribution (see `.gitignore`).
-
+NA
 ---
 
 ## 8. Resume Bullet Point
