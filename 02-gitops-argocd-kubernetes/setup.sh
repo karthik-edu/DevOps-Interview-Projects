@@ -23,7 +23,7 @@ ARGO_VERSION="v2.11.3"
 GITHUB_USER="${GITHUB_USER:-}"
 REPO_NAME="${REPO_NAME:-gitops-argocd-demo}"
 WORKSPACE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ARGO_PORT="${ARGO_PORT:-8080}"
+ARGO_PORT="${ARGO_PORT:-8787}"
 
 log()  { echo "[$(date +%T)] $*"; }
 ok()   { echo "[$(date +%T)] ✓ $*"; }
@@ -92,15 +92,40 @@ kubectl rollout status deployment/argocd-server \
   -n "${ARGOCD_NS}" --timeout=300s
 ok "ArgoCD is running"
 
+# Patch argocd-server to run without TLS (insecure mode) — required for
+# plain gRPC login over kubectl port-forward in a local lab environment.
+log "Patching argocd-server to run in insecure (plain HTTP) mode..."
+kubectl patch deployment argocd-server \
+  -n "${ARGOCD_NS}" \
+  --type=json \
+  -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--insecure"}]' \
+  2>/dev/null || true   # no-op if already patched
+
+log "Waiting for argocd-server to re-roll out after patch (up to 3 min)..."
+kubectl rollout status deployment/argocd-server \
+  -n "${ARGOCD_NS}" --timeout=180s
+ok "ArgoCD is running in insecure mode"
+
 # --------------------------------------------------------------------------- #
 # 4. Expose ArgoCD and log in
 # --------------------------------------------------------------------------- #
 log "Port-forwarding ArgoCD server on localhost:${ARGO_PORT}..."
 pkill -f "kubectl port-forward.*argocd-server" 2>/dev/null || true
-kubectl port-forward svc/argocd-server \
-  -n "${ARGOCD_NS}" "${ARGO_PORT}:443" &
+nohup kubectl port-forward svc/argocd-server \
+  -n "${ARGOCD_NS}" "${ARGO_PORT}:80" \
+  >/tmp/argocd-portforward.log 2>&1 &
 PF_PID=$!
-sleep 3
+disown ${PF_PID}
+
+log "Waiting for port-forward to be ready..."
+for i in $(seq 1 20); do
+  if curl -s --max-time 2 "http://localhost:${ARGO_PORT}" >/dev/null 2>&1; then
+    ok "Port-forward is ready"
+    break
+  fi
+  [ "$i" -eq 20 ] && fail "Port-forward did not become ready after 20 attempts"
+  sleep 2
+done
 
 ARGO_PWD=$(kubectl -n "${ARGOCD_NS}" get secret argocd-initial-admin-secret \
   -o jsonpath="{.data.password}" | base64 -d)
@@ -108,7 +133,7 @@ ARGO_PWD=$(kubectl -n "${ARGOCD_NS}" get secret argocd-initial-admin-secret \
 argocd login "localhost:${ARGO_PORT}" \
   --username admin \
   --password "${ARGO_PWD}" \
-  --insecure
+  --plaintext
 ok "Logged in to ArgoCD (admin password: ${ARGO_PWD})"
 
 # --------------------------------------------------------------------------- #
@@ -117,9 +142,14 @@ ok "Logged in to ArgoCD (admin password: ${ARGO_PWD})"
 log "Preparing GitOps repository..."
 
 cd "${WORKSPACE_ROOT}"
+
+# Ensure this is a git repo with at least one commit
 if ! git rev-parse --git-dir >/dev/null 2>&1; then
+  log "Initialising git repo..."
   git init -b main
-  git add .
+fi
+git add -A
+if ! git diff --cached --quiet; then
   git commit -m "Initial GitOps manifests"
 fi
 
@@ -132,6 +162,8 @@ if gh repo view "${GITHUB_USER}/${REPO_NAME}" >/dev/null 2>&1; then
   git push origin main
 else
   log "Creating GitHub repo and pushing..."
+  # Remove any stale remote before gh creates the repo
+  git remote remove origin 2>/dev/null || true
   gh repo create "${GITHUB_USER}/${REPO_NAME}" \
     --public \
     --source . \
@@ -183,10 +215,25 @@ echo ""
 echo "============================================================"
 echo " Project 02 — GitOps with ArgoCD is running"
 echo "============================================================"
-echo "  ArgoCD UI   : https://localhost:${ARGO_PORT}"
-echo "  Login       : admin / ${ARGO_PWD}"
+echo ""
+echo "  *** ARGOCD CREDENTIALS ***"
+echo "  Username    : admin"
+echo "  Password    : ${ARGO_PWD}"
+echo ""
+echo "  To retrieve the password manually at any time:"
+echo "    kubectl -n argocd get secret argocd-initial-admin-secret \\"
+echo "      -o jsonpath='{.data.password}' | base64 -d && echo"
+echo ""
+echo "  *** ACCESS & STATUS ***"
+echo "  ArgoCD UI   : http://localhost:${ARGO_PORT}"
 echo "  App status  : argocd app get ${APP_NAME}"
 echo "  Git repo    : ${REPO_URL}"
+echo ""
+echo "  *** QUICK CHECK STEPS ***"
+echo "  1. Open UI   : open https://localhost:${ARGO_PORT}  (or xdg-open on Linux)"
+echo "  2. CLI login : argocd login localhost:${ARGO_PORT} --username admin --password '${ARGO_PWD}' --plaintext"
+echo "  3. App health: argocd app get ${APP_NAME}"
+echo "  4. K8s pods  : kubectl get pods -n ${APP_NS}"
 echo ""
 echo "  To trigger a GitOps rollout:"
 echo "    # edit manifests/base/deployment.yaml (e.g. change image tag)"
@@ -203,5 +250,6 @@ echo "    minikube delete --profile ${MINIKUBE_PROFILE}"
 echo "    gh repo delete ${GITHUB_USER}/${REPO_NAME} --yes"
 echo "============================================================"
 
-log "ArgoCD port-forward is running (PID ${PF_PID}). Press Ctrl+C to stop."
-wait ${PF_PID}
+log "ArgoCD port-forward is running in background (PID ${PF_PID})"
+log "Logs: tail -f /tmp/argocd-portforward.log"
+log "To stop: kill ${PF_PID}"
