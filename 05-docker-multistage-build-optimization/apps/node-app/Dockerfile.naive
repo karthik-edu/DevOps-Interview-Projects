@@ -1,0 +1,27 @@
+# =============================================================================
+# NAIVE single-stage Dockerfile — for size comparison ONLY
+#
+# Problems with this approach (what interviewers expect you to identify):
+#   1. Uses node:20 (Debian-based) — ~1.1 GB base image
+#   2. Installs ALL dependencies including devDependencies (nodemon, etc.)
+#   3. Copies entire source tree including .git, tests, docs, local configs
+#   4. Runs as root (uid 0) — major security risk
+#   5. No layer caching optimisation — npm install runs on every source change
+#   6. Final image contains build tools, compilers, package manager cache
+# =============================================================================
+
+FROM node:20
+
+WORKDIR /app
+
+# Copies EVERYTHING including .git, README, test files, local .env
+COPY . .
+
+# Installs ALL deps (including devDependencies like nodemon)
+# No cache mount — downloads everything fresh every build
+RUN npm install
+
+EXPOSE 3000
+
+# Runs as root — if the app is compromised, attacker has root in the container
+CMD ["node", "src/index.js"]

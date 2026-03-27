@@ -1,0 +1,5 @@
+# Generated kubeconfig — contains cluster credentials, never commit
+kubeconfig
+
+# Temporary wrapper scripts written by setup.sh
+/tmp/

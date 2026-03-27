@@ -1,0 +1,25 @@
+# =============================================================================
+# NAIVE single-stage Dockerfile — for size comparison ONLY
+#
+# Problems with this approach:
+#   1. Final image is ~850 MB — entire Go toolchain stays in the image
+#   2. go build is NOT cached — recompiles from scratch every time
+#   3. Binary is dynamically linked (default) — won't run on scratch/Alpine
+#   4. Runs as root
+#   5. Contains go compiler, git, build tools — massive attack surface
+#   6. No -ldflags stripping — binary includes debug symbols
+# =============================================================================
+
+FROM golang:1.22
+
+WORKDIR /app
+
+COPY . .
+
+# No module cache, no CGO_ENABLED=0, no symbol stripping
+RUN go build -o server .
+
+EXPOSE 8080
+
+# Runs as root
+CMD ["./server"]
