@@ -1,7 +1,7 @@
-variable "aws_region" {
-  description = "AWS region to deploy into"
+variable "location" {
+  description = "Azure region to deploy into"
   type        = string
-  default     = "us-east-1"
+  default     = "eastus"
 }
 
 variable "environment" {
@@ -13,35 +13,40 @@ variable "environment" {
 variable "project" {
   description = "Project name used as a resource prefix"
   type        = string
-  default     = "terraform-aws-iac"
+  default     = "terraform-azure-iac"
 }
 
-variable "vpc_cidr" {
-  description = "CIDR block for the VPC"
+variable "vnet_cidr" {
+  description = "Address space for the Virtual Network"
   type        = string
   default     = "10.0.0.0/16"
 }
 
-variable "instance_type" {
-  description = "EC2 instance type for ASG instances"
+variable "vm_size" {
+  description = "Azure VM size for VMSS instances"
   type        = string
-  default     = "t3.micro"
+  default     = "Standard_B1s"
+}
+
+variable "ssh_public_key" {
+  description = "SSH public key for the azureuser admin account on VMSS instances"
+  type        = string
 }
 
 variable "min_size" {
-  description = "ASG minimum instance count"
+  description = "VMSS minimum instance count"
   type        = number
   default     = 1
 }
 
 variable "max_size" {
-  description = "ASG maximum instance count"
+  description = "VMSS maximum instance count"
   type        = number
-  default     = 2
+  default     = 3
 }
 
 variable "desired_capacity" {
-  description = "ASG desired instance count"
+  description = "VMSS initial instance count"
   type        = number
   default     = 1
 }

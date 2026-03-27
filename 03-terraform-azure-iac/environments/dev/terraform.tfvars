@@ -1,8 +1,8 @@
 # Dev environment overrides
 # Override any variable from variables.tf here.
-# aws_region and environment are set via TF_VAR_* in setup.sh.
+# location, environment, and ssh_public_key are set via TF_VAR_* in setup.sh.
 
-instance_type    = "t3.micro"
+vm_size          = "Standard_B1s"   # ~t3.micro equivalent, keep costs low in dev
 min_size         = 1
-max_size         = 2
-desired_capacity = 1   # Keep costs low in dev; scale up to test ASG behaviour
+max_size         = 3
+desired_capacity = 1                # Scale up to test autoscale behaviour

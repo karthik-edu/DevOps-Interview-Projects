@@ -2,30 +2,28 @@
 # environments/dev/main.tf
 #
 # Dev environment: calls all three modules with dev-sized resources.
-# Remote state backend is configured at init time via setup.sh.
+# Remote state backend is configured at init time via setup.sh using
+# Azure Blob Storage (native blob lease locking — no DynamoDB needed).
 # =============================================================================
 
 terraform {
   required_version = ">= 1.8"
   required_providers {
-    aws = {
-      source  = "hashicorp/aws"
-      version = "~> 5.58"
+    azurerm = {
+      source  = "hashicorp/azurerm"
+      version = "~> 3.110"
     }
   }
 
-  backend "s3" {
-    # bucket, key, region, dynamodb_table, encrypt are passed via
-    # -backend-config flags in setup.sh so this file stays environment-agnostic.
+  backend "azurerm" {
+    # resource_group_name, storage_account_name, container_name, key
+    # are passed via -backend-config flags in setup.sh
+    # so this file stays environment-agnostic.
   }
 }
 
-provider "aws" {
-  region = var.aws_region
-
-  default_tags {
-    tags = local.common_tags
-  }
+provider "azurerm" {
+  features {}
 }
 
 locals {
@@ -39,34 +37,47 @@ locals {
 }
 
 # --------------------------------------------------------------------------- #
+# Resource Group — top-level container for all environment resources in Azure
+# --------------------------------------------------------------------------- #
+resource "azurerm_resource_group" "this" {
+  name     = "${local.name}-rg"
+  location = var.location
+
+  tags = local.common_tags
+}
+
+# --------------------------------------------------------------------------- #
 # Modules
 # --------------------------------------------------------------------------- #
-module "vpc" {
-  source   = "../../modules/vpc"
-  name     = local.name
-  vpc_cidr = var.vpc_cidr
-  tags     = local.common_tags
+module "vnet" {
+  source              = "../../modules/vnet"
+  name                = local.name
+  location            = azurerm_resource_group.this.location
+  resource_group_name = azurerm_resource_group.this.name
+  vnet_cidr           = var.vnet_cidr
+  tags                = local.common_tags
 }
 
-module "alb" {
-  source            = "../../modules/alb"
-  name              = local.name
-  vpc_id            = module.vpc.vpc_id
-  public_subnet_ids = module.vpc.public_subnet_ids
-  tags              = local.common_tags
+module "lb" {
+  source              = "../../modules/lb"
+  name                = local.name
+  location            = azurerm_resource_group.this.location
+  resource_group_name = azurerm_resource_group.this.name
+  tags                = local.common_tags
 }
 
-module "ec2" {
-  source                = "../../modules/ec2"
-  name                  = local.name
-  vpc_id                = module.vpc.vpc_id
-  private_subnet_ids    = module.vpc.private_subnet_ids
-  alb_security_group_id = module.alb.alb_security_group_id
-  target_group_arn      = module.alb.target_group_arn
-  environment           = var.environment
-  instance_type         = var.instance_type
-  min_size              = var.min_size
-  max_size              = var.max_size
-  desired_capacity      = var.desired_capacity
-  tags                  = local.common_tags
+module "vmss" {
+  source              = "../../modules/vmss"
+  name                = local.name
+  location            = azurerm_resource_group.this.location
+  resource_group_name = azurerm_resource_group.this.name
+  private_subnet_ids  = module.vnet.private_subnet_ids
+  lb_backend_pool_id  = module.lb.backend_pool_id
+  ssh_public_key      = var.ssh_public_key
+  environment         = var.environment
+  vm_size             = var.vm_size
+  min_size            = var.min_size
+  max_size            = var.max_size
+  desired_capacity    = var.desired_capacity
+  tags                = local.common_tags
 }
