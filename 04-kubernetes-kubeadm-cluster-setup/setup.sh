@@ -44,6 +44,15 @@ if ! command -v multipass >/dev/null 2>&1; then
   command -v snap >/dev/null 2>&1 || fail "snap is not available; install multipass manually"
   sudo snap install multipass
   ok "multipass installed"
+  # Wait for the multipassd daemon to fully initialize (generates root cert, etc.)
+  log "Waiting for multipassd to be ready..."
+  for i in $(seq 1 30); do
+    if multipass version >/dev/null 2>&1; then
+      break
+    fi
+    [ "${i}" -eq 30 ] && fail "multipassd did not become ready after 30 s"
+    sleep 1
+  done
 fi
 
 command -v kubectl >/dev/null 2>&1 || \
@@ -119,9 +128,10 @@ inject_and_wrap() {
 # --------------------------------------------------------------------------- #
 # 3. Install containerd + kubeadm on every node (idempotent inside the script)
 # --------------------------------------------------------------------------- #
+mkdir -p "${WORKSPACE_ROOT}/.wrapped"
 log "Installing container runtime and Kubernetes components on all nodes..."
 
-WRAPPED_COMMON="/tmp/common-wrapped.sh"
+WRAPPED_COMMON="${WORKSPACE_ROOT}/.wrapped/common-wrapped.sh"
 inject_and_wrap "${WRAPPED_COMMON}" \
   "${WORKSPACE_ROOT}/scripts/common.sh" \
   K8S_VERSION "${K8S_VERSION}"
@@ -141,7 +151,7 @@ CP_IP=$(multipass info "${CP_VM}" | awk '/IPv4/ { print $2; exit }')
 [ -n "${CP_IP}" ] || fail "Could not determine IP of ${CP_VM}"
 ok "Control-plane IP: ${CP_IP}"
 
-WRAPPED_CP="/tmp/controlplane-wrapped.sh"
+WRAPPED_CP="${WORKSPACE_ROOT}/.wrapped/controlplane-wrapped.sh"
 inject_and_wrap "${WRAPPED_CP}" \
   "${WORKSPACE_ROOT}/scripts/controlplane.sh" \
   CP_IP         "${CP_IP}" \
@@ -164,6 +174,18 @@ sed -i "s|server: https://[^/]*:6443|server: https://${CP_IP}:6443|g" \
 chmod 600 "${KUBECONFIG_LOCAL}"
 ok "kubeconfig saved → ${KUBECONFIG_LOCAL}"
 
+# Merge into ~/.kube/config so all terminals pick it up automatically (idempotent)
+log "Merging kubeconfig into ~/.kube/config..."
+mkdir -p "${HOME}/.kube"
+if [ -f "${HOME}/.kube/config" ]; then
+  KUBECONFIG="${HOME}/.kube/config:${KUBECONFIG_LOCAL}" kubectl config view --flatten > /tmp/kube-merged.conf
+  mv /tmp/kube-merged.conf "${HOME}/.kube/config"
+else
+  cp "${KUBECONFIG_LOCAL}" "${HOME}/.kube/config"
+fi
+chmod 600 "${HOME}/.kube/config"
+ok "kubeconfig merged → ~/.kube/config (all terminals ready)"
+
 log "Generating worker join command..."
 # Do NOT suppress stderr — if this fails we need to see why
 JOIN_CMD=$(multipass exec "${CP_VM}" -- sudo kubeadm token create --print-join-command)
@@ -174,7 +196,7 @@ JOIN_CMD=$(multipass exec "${CP_VM}" -- sudo kubeadm token create --print-join-c
 # --------------------------------------------------------------------------- #
 for w in "${WORKER_VMS[@]}"; do
   log "Joining '${w}' to the cluster..."
-  WRAPPED_W="/tmp/worker-wrapped-${w}.sh"
+  WRAPPED_W="${WORKSPACE_ROOT}/.wrapped/worker-wrapped-${w}.sh"
   inject_and_wrap "${WRAPPED_W}" \
     "${WORKSPACE_ROOT}/scripts/worker.sh" \
     JOIN_CMD "${JOIN_CMD}"
@@ -213,7 +235,7 @@ log "Deploying test nginx workload..."
 kubectl apply -f "${WORKSPACE_ROOT}/manifests/test-deployment.yaml"
 
 log "Waiting for nginx-demo deployment to roll out (up to 2 min)..."
-kubectl rollout status deployment/nginx-demo --timeout=120s
+kubectl rollout status deployment/nginx-demo --timeout=300s
 ok "Test deployment is running"
 
 kubectl get pods -l app=nginx-demo -o wide

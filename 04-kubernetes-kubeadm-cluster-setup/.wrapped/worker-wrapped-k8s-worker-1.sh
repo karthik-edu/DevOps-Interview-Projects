@@ -1,3 +1,4 @@
+JOIN_CMD=kubeadm\ join\ 10.4.94.93:6443\ --token\ t5jze0.zgzvqz7iy13fjj3x\ --discovery-token-ca-cert-hash\ sha256:9382f4b5f3410281fff4e2d88f77a4b8cec2436773da4c19c888ad91c86eaa07\ 
 #!/usr/bin/env bash
 # =============================================================================
 # scripts/worker.sh — Run on each worker node
